@@ -34,6 +34,7 @@ El flujo de captura y análisis está íntegramente programado en **R** y docume
 * `tarea2_qto.qmd`: Código fuente completo en Quarto (extracción, limpieza, cruce de datos y visualizaciones).
 * `tarea2_qto.html`: Informe interactivo renderizado.
 * `tarea2_qto.pdf`: Versión en documento portátil del estudio.
+* `datos_kworb.csv`: Dataset intermedio generado tras el scraping estático en kworb.net.
 * `datos_pageviews.csv`: Dataset intermedio generado tras el scraping dinámico en Wikimedia.
 * `datos_final.csv`: Dataset final consolidado y limpio utilizado para el análisis.
 
