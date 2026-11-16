@@ -1,0 +1,633 @@
+---
+lang: es
+title: "Web scraping aplicado"
+categories: [Web scraping estático y dinámico, Datos No Estructurados, selección XPath, OpenData]
+author: 
+  - "César Francisco Veintimilla"
+  - "Hugo Carrasco Romaguera"
+toc: true
+format: pdf
+lightbox: 
+  match: auto
+  effect: fade
+  desc-position: left
+  css-class: "lightwidth"
+---
+
+# 1. Introducción
+La industria musical actual funciona bajo una dinámica de consumo hiperconectado donde no siempre un mayor volumen de streams en plataformas musicales se corresponde con un interés orgánico y sostenido por parte del público. De este contexto surgen las cuestiones que plantea este proyecto:
+
+* **¿Son los artistas más escuchados en Spotify los que más foco de interés generan en Internet?**
+* **¿Si comparamos esos artistas worldwide con los cantantes que más streams producen en España veremos diferencias notorias en cuanto a las búsquedas que reciben?**
+
+A lo largo de esta segunda tarea de la asignatura *Datos No Estructurados* nos encargaremos de obtener los datos con los que poder estudiar ambos paradigmas mediante técnicas de scrapeo. Buscamos aterrizar nuestro planteamiento sobre dos variables a estudiar: el **consumo pasivo** (*reproducciones en Spotify*) frente a la **curiosidad activa** (*búsquedas en Wikipedia*).
+
+Hemos estructurado el estudio en dos fases de extracción de datos con tal de responder a la hipotésis de que *"Los artistas top globales reciben más búsquedas en Internet debido a su amplio alcance mientras que, los artistas más escuchados a nivel nacional que aún no están tan establecidos en el mundo musical, captan menos interacciones"*:
+
+1. **Scraping Estático**: Se ha diseñado un rastreador estático enfocado en el portal estadístico [Kworb.net](https://kworb.net/), el cuál ofrece políticas de uso muy permisivas puesto que el administrador del sitio hace posible el rastreo completo de todo el contenido sin restricciones. Además, las listas de Kworb se actualizan de manera diaria y en ocasiones, en tiempo real, ofreciendo cortes diarios. De esta forma hemos logrado extraer información verídica de cantantes y número de reproducciones tanto a nivel global como nacional.
+
+2. **Scraping Dinámico y Navegación Automatizada**: Partiendo del conjunto de artistas extraídos previamente, se implementa un bot de navegación que interactúa de forma asíncrona con [pageviews.wmcloud.org](https://pageviews.wmcloud.org/), la herramienta oficial de Wikimedia que muestra cuántas veces se ha visitado una página de Wikipedia. Mediante `RSelenium`, el bot elige la Wikipedia (inglesa o española), el periodo y el tipo de visitante, escribe los artistas uno a uno y lee la tabla de resultados. Las visitas a la página de Wikipedia de cada artista nos sirven como medida de esa *curiosidad activa*: cuánta gente se ha molestado en buscar información sobre él. Además, al hacerlo en la Wikipedia inglesa y en la española podemos ver no solo **cuánto** interesa cada artista, sino también **dónde**.
+
+## 1.2. Impacto y usabilidad del estudio
+El impacto de este estudio radica en su capacidad para ofrecer una radiografía precisa sobre cómo se distribuye y consume el interés musical en la era del streaming. Los resultados obtenidos no solo son útiles desde una perspectiva académica y técnica (al demostrar la viabilidad de integrar metodologías de scraping estático y dinámico en R para la recopilación de datos no estructurados), sino que poseen un alto valor práctico para el sector de la industria musical.
+
+En concreto, este análisis resulta de especial interés para agencias de management, promotores de conciertos (como Wegow o Live Nation) y departamentos de marketing discográfico, ya que permite distinguir entre artistas con un consumo sostenido y pasivo frente a aquellos que generan una tracción real y activa en buscadores. Comprender esta disonancia a través del "Índice de Dependencia del Hit" y el cruce con las métricas de Wikipedia facilita una mejor toma de decisiones a la hora de planificar estrategias de promoción, evaluar el impacto de fenómenos locales frente a artistas globales y diseñar giras más ajustadas a la verdadera demanda orgánica del público.
+
+# 2. Scraping estático
+## 2.1. Selección de la web
+Tras evaluar distintas alternativas de fuentes que albergaran estadísticas relacionadas con el consumo musical, determinamos que *kworb.net* era la mejor opción ya que proporcionaba un acceso rápido y sencillo a métricas consolidadas y actualizadas. Además, tras echar un vistazo a su intuitiva interfaz, pasamos a comprobar el *robots.txt* leyendo lo siguiente:
+
+User-agent: *
+Allow: /
+
+Sitemap: https://kworb.net/sitemaphttps.txt**
+
+De esta forma aseguramos la compatibilidad ética y la ausencia de bloqueos que la página web ofrecía hacia posibles rastreos automáticos. 
+
+## 2.2. Extracción de los top artistas globales
+Puesto que *kworb.net* ofrece listas diarias y semanales de artistas y canciones de las plataformas musicales más conocidas, decidimos centrar el estudio únicamente en [los artistas con más streams históricos en Spotify](https://kworb.net/spotify/artists.html). Esta sería nuestra tabla base y a partir de ella comenzamos a scrapear algunos datos accediendo a los XPath relativos de los elementos que nos interesaban. Estos eran el nombre del artista y el link que contiene en el *href*, el cuál nos guiará posteriormente a la página concreta del artista en *kworb.net* de la que obtendremos el resto de variables.
+A continuación se muestra como nos conectamos y creamos una sesión en el sitio usando la función `session()` del paquete `rvest` y extraemos su código mediante `read_html()`. Además, nos quedamos con los 8 primeros elementos (tanto nombre como hipervínculo) de la primera columna de nuestra tabla base.
+
+```{r warning=FALSE, message=FALSE}
+library(rvest)
+library(dplyr)
+library(RSelenium)
+library(stringr)
+library(readr)
+
+# URLs y cabeceras
+base_url <- "https://kworb.net/" # La utilizaremos para poder construir la URL del artista posteriormente
+url_artistas <- "https://kworb.net/spotify/artists.html"
+
+# petición con rvest
+pagina_principal <- session(url_artistas) %>%
+  read_html()
+
+# PRIMERA EXTRACCIÓN
+# Extraemos Nombres y Enlaces de la columna 1
+nodos_artistas <- pagina_principal %>%
+  html_elements(xpath = "//table/tbody/tr/td[1]/div/a") %>%
+  head(8)
+
+nombres_artistas <- nodos_artistas %>% html_text2()
+enlaces_artistas <- nodos_artistas %>% html_attr("href")
+```
+
+Seguidamente, se guardan los datos extraídos en un *DataFrame* que contiene las variables de interés:
+
+* **Posicion_Global**: Como los datos se extraen en orden, un simple índice para cada una de las 8 filas.
+* **Artista**: El nombre de cada artista extraído previamente con `html_text2()`.
+* **URL_Perfil**: Objeto resultante de la unión del dominio del servidor (objeto `base_url`) con la ruta concreta de cada artista (objeto `url_artistas`), obteniendo así la URL completa de la página de cada cantante. Esta variable será imprescindible para poder obtener el resto de datos.
+* **Streams_Totales**, **Cancion_Hit** y **Streams_Hit**: Es información que se obtiene tras haber visitado la página de cada artista. Estas variables se rellenarán tras ejecutar el bucle.
+
+```{r warning=FALSE, message=FALSE}
+datos_musica <- data.frame(
+  Posicion_Global = 1:8,
+  Artista = nombres_artistas,
+  URL_Perfil = paste0(base_url, enlaces_artistas),
+  Streams_Totales = NA,
+  Cancion_Hit = NA,
+  Streams_Hit = NA
+)
+```
+
+Es ahora cuando entra en juego la variable `URL_perfil` ya que gracias a ella podemos acceder a la URL de cada artista en *kworb.net* iterando un bucle que recorra cada una de las filas de `datos_musica`. Así, para cada uno de ellos, extraeremos:
+
+* **Streams_Totales**: Número total de reproducciones que ha generado el artista.
+* **Cancion_Hit**: Su canción con mayor número de reproducciones.
+* **Streams_Hit**: Número de reproducciones de *Cancion_Hit*.
+
+Finalmente se limpia el objeto final realizando algunas conversiones y se crea un ratio que relaciona el número de escuchas en la canción más popular sobre el número total de escuchas. Este ratio es fundamental para evaluar que tanto depende la discografía de cada cantante de la canción que más viralizaron.
+
+```{r warning=FALSE, message=FALSE}
+for (i in 1:nrow(datos_musica)) {
+
+  tryCatch({
+    pagina_artista <- session(datos_musica$URL_Perfil[i]) %>%
+      read_html()
+
+    datos_musica$Streams_Totales[i] <- pagina_artista %>%
+      html_element(xpath = "//table[1]/tbody/tr[1]/td[2]") %>%
+      html_text2()
+
+    datos_musica$Cancion_Hit[i] <- pagina_artista %>%
+      html_element(xpath = "//table[2]/tbody/tr[1]/td[1]/div/a") %>%
+      html_text2()
+
+    datos_musica$Streams_Hit[i] <- pagina_artista %>%
+      html_element(xpath = "//table[2]/tbody/tr[1]/td[2]") %>%
+      html_text2()
+  })
+
+  Sys.sleep(1) # Pausa para simular el comportamiento humano y no saturar el sitio web.
+}
+
+df_global <- datos_musica %>%
+  mutate(
+    Streams_Totales     = parse_number(Streams_Totales),
+    Streams_Hit         = parse_number(Streams_Hit),
+    Dependencia_Hit_Pct = round(Streams_Hit / Streams_Totales * 100, 2),
+    Grupo               = "Global"
+  )
+```
+
+## 2.3. Extracción de los artistas más escuchados a nivel nacional
+Nuestra intención inicial fue replicar el dataframe de artistas globales pero *kworb.net* no ofrecía esa información segmentada por países. Lo más cercano a lo que pudimos llegar fueron los cortes diarios/semanales de canciones más escuchadas y su artista. Efectivamente, al tirar de esa lista, el ranking se ve sesgado por los hits de los últimos años (como *"La Bachata"* de *Manuel Turizo*) y no refleja el peso histórico acumulado de un artista en el país de la misma forma que lo hace la tabla global. Igualmente procedimos de esta forma dado que fabricar el histórico real de España implicaría hacer scraping de miles de páginas diarias durante años y eso es inviable para esta práctica. Pensamos que podríamos hacer uso de esa variable *proxy*: "artistas con una tracción masiva a nivel local/regional (donde entrarán los Quevedo y Rosalía, junto a latinos muy fuertes aquí por tener canciones muy virales)" y, mediante la función ``distinct()``, quedarnos con los primeros 8 artistas únicos (ya que como el top viene por canciones, se repetían artistas).
+Al final esta variable nos será útil puesto que abordamos igualmente el objetivo de obtener artistas con menor alcance y podemos crear el contraste que queremos. El código empleado mantiene la estructura que usamos para los artistas globales:
+
+```{r warning=FALSE, message=FALSE}
+url_espana <- "https://kworb.net/spotify/country/es_daily_totals.html"
+
+pagina_espana <- session(url_espana) %>%
+  read_html()
+
+# a[1] es el artista y a[2] la canción
+nodos_artistas_es  <- pagina_espana %>% html_elements(xpath =
+"//table/tbody/tr/td[1]/div/a[1]")
+nodos_canciones_es <- pagina_espana %>% html_elements(xpath =
+"//table/tbody/tr/td[1]/div/a[2]")
+
+streams_hit_es <- pagina_espana %>%
+  html_elements(xpath = "//table/tbody/tr/td[7]") %>%
+  html_text2()
+
+# los enlaces vienen como '../artist/...'
+enlaces_es <- nodos_artistas_es %>%
+  html_attr("href") %>%
+  str_replace("\\.\\./", "/spotify/") %>%
+  str_replace("\\.html", "_songs.html")
+
+df_completo_es <- data.frame(
+  Artista         = nodos_artistas_es %>% html_text2(),
+  URL_Perfil      = paste0(base_url, enlaces_es),
+  Streams_Totales = NA,
+  Cancion_Hit     = nodos_canciones_es %>% html_text2(),
+  Streams_Hit_ES  = streams_hit_es
+)
+
+df_espana_base <- df_completo_es %>%
+  distinct(Artista, .keep_all = TRUE) %>%
+  head(8) %>%
+  mutate(Posicion = row_number())
+
+for (i in 1:nrow(df_espana_base)) {
+
+  tryCatch({
+    pagina_artista <- session(df_espana_base$URL_Perfil[i]) %>%
+      read_html()
+
+    df_espana_base$Streams_Totales[i] <- pagina_artista %>%
+      html_element(xpath = "//table[1]/tbody/tr[1]/td[2]") %>%
+      html_text2()
+  })
+
+  Sys.sleep(1)
+}
+
+df_espana <- df_espana_base %>%
+  mutate(
+    Streams_Totales     = parse_number(Streams_Totales),
+    Streams_Hit_ES      = parse_number(Streams_Hit_ES),
+    Dependencia_Hit_Pct = round(Streams_Hit_ES / Streams_Totales * 100, 2),
+    Grupo               = "España"
+  )
+
+datos_A <- bind_rows(
+  df_global %>% select(Artista, Grupo, Posicion_Global, Streams_Totales,
+Cancion_Hit, Dependencia_Hit_Pct),
+  df_espana %>% select(Artista, Grupo, Posicion, Streams_Totales,
+Cancion_Hit, Dependencia_Hit_Pct)
+)
+
+intersect(df_global$Artista, df_espana$Artista)
+```
+
+::: {.callout-note title="Problema en la composición de las URLs"}
+Al capturar los enlaces hacia los perfiles de los artistas españoles (`nodos_artistas_es`), nos encontramos con un problema técnico: la arquitectura de Kworb gestiona las rutas de manera distinta dependiendo de la profundidad en la que estemos navegando.
+
+Mientras que en el top global la URL se extraía limpia, en la tabla diaria de España (al estar dentro del subdirectorio */country/*), los enlaces venían programados con una ruta relativa de retroceso, con este formato: *../artist/0tmw...html*. Si intentaba concatenar esto directamente con el dominio del servidor almacenado en `base_url` , R generaba enlaces rotos que el bucle era incapaz de resolver.
+
+Para solucionar este inconveniente, implementamos un proceso de limpieza de las cadenas de texto utilizando `stringr` directamente sobre el vector de enlaces extraídos. De ahí que se haya utilizado este bloque en el código anterior:
+
+```{r warning=FALSE, message=FALSE, eval = FALSE}
+enlaces_es <- nodos_artistas_es %>%
+  html_attr("href") %>%
+  str_replace("\\.\\./", "/spotify/") %>%
+  str_replace("\\.html", "_songs.html")
+```
+:::
+
+# 3. Scraping dinámico
+
+## 3.1. Selección de la web
+
+Esta fue, con diferencia, la parte que más nos costó del trabajo. La idea inicial era completar el análisis con datos de **conciertos** (cuántos conciertos da cada artista y en cuántos países) y para ello probamos varias webs de venta de entradas y de agenda musical. Ninguna nos sirvió:
+
+| Web | Problema |
+|---|---|
+| *Bandsintown* | Cloudflare bloqueaba el Firefox automatizado nada más abrirlo. |
+| *TicketSwap* | Bloqueo de verificación ("Unable to verify") con el navegador automatizado. |
+| *Ticketmaster*, *Live Nation*, *Eventbrite* | Sus condiciones de uso prohíben expresamente el uso de bots y *scrapers*. |
+| *DICE* | Sus datos venían ya en el HTML (scraping estático) y además está protegida por Cloudflare. |
+| *Concert Archives* | Totalmente estática: los conciertos aparecen en el código fuente original. |
+| *ListenBrainz* | Dinámica y permitida, pero sus rankings estaban dominados por BTS (comunidad de usuarios muy concreta) y las estadísticas iban con retraso. |
+
+De este proceso sacamos una conclusión clara: las webs de entradas se blindan contra cualquier robot (por miedo a los revendedores) y las grandes plataformas lo prohíben en sus condiciones, por lo que tuvimos que buscar una fuente de **datos abiertos**. Así llegamos a [Pageviews Analysis](https://pageviews.wmcloud.org/), una herramienta mantenida por la comunidad de Wikimedia en la que se pueden consultar las visitas a cualquier página de Wikipedia. Encaja con nuestra pregunta porque nos da una medida del interés del público **por artista**, que podemos unir con los datos de *kworb.net* a través del nombre.
+
+Antes de empezar comprobamos su *robots.txt* y la dirección `https://pageviews.wmcloud.org/robots.txt` devuelve un error **404**, es decir, la web no tiene *robots.txt* y por tanto no establece ninguna restricción a los robots. Además, los datos que muestra provienen de la API de Wikimedia y tienen licencia **CC0** (dominio público). Aun así, decidimos actuar con prudencia: pocas consultas (agrupando los artistas de 8 en 8), pausas entre acciones con `Sys.sleep()` y solo datos agregados, sin ningún dato personal de usuarios. También aclaramos que, aunque Wikipedia se utilizó en clase, no scrapeamos los artículos de Wikipedia, sino esta herramienta, que es una web distinta y con otro tipo de datos.
+
+## 3.2. ¿Por qué scraping dinámico?
+
+Siguiendo la regla de no usar scraping dinámico cuando se puede hacer con estático, comprobamos primero si los datos estaban en el HTML original. Para ello cargamos las visitas de *Bad Bunny*, abrimos el código fuente (`Ctrl + U`) y buscamos su nombre con `Ctrl + F`: **0 coincidencias**. El código fuente original solo contiene la estructura vacía de la aplicación y todos los datos (gráfico y tabla) se cargan después mediante JavaScript.
+
+Esto es importante porque, aunque la URL cambia al elegir opciones (por ejemplo `?project=en.wikipedia.org&pages=Bad_Bunny`), si intentáramos leerla con `rvest` solo obtendríamos esa caja vacía. Por eso necesitamos un navegador real que ejecute el JavaScript, y aquí entra `RSelenium`.
+
+## 3.3. Preparación del navegador
+
+Arrancamos Firefox y `rsDriver()` crea el servidor de Selenium y el navegador, y de él sacamos el cliente (`driver`), que es el "mando a distancia" con el que le damos órdenes a Firefox.
+
+> El código del scraping dinámico se muestra pero no se ejecuta al renderizar el documento (`eval=FALSE`): el bot tarda varios minutos y depende de Java y Firefox. Los datos obtenidos se guardaron en archivos `.csv` que se cargan más adelante, lo que hace que el informe sea replicable.
+
+```{r eval=FALSE}
+rD <- rsDriver(browser = "firefox",
+               geckover = "latest",
+               iedrver = NULL,
+               chromever = NULL,
+               phantomver = NULL,
+               port = as.integer(runif(1, 4000, 8000)))
+driver <- rD[["client"]]
+```
+
+## 3.4. Interacciones y selectores
+
+Para cada paso inspeccionamos el elemento con el inspector de Firefox y elegimos un selector **estable**. Pronto vimos que los `id` de esta web son del tipo `v-0-20` o `v-0-31`: los genera la propia aplicación y pueden cambiar en cada carga, así que no los usamos. En su lugar utilizamos los atributos `aria-label` (fijos) con selectores CSS y, cuando el elemento solo se podía reconocer por su texto, XPath (ya que CSS no deja buscar por texto).
+
+Las interacciones que realiza nuestro bot son las siguientes:
+
+* **Elegir la Wikipedia**: borramos el proyecto que haya escrito pulsando su X (`input[aria-label='Proyecto'] ~ span.cdx-text-input__clear-icon`), escribimos el nuevo en la caja (`input[aria-label='Proyecto']`) y elegimos la sugerencia. Lo hacemos para la Wikipedia inglesa y para la española, y así poder ver el interés mundial y el hispano por separado.
+* **Poner el tipo de fecha en "Mensual"**: abrimos el desplegable (`div[aria-label='Tipo de fecha']`) y pulsamos la opción "Mensual". Como vamos a mirar más de 10 años, en diario el gráfico tenía miles de puntos y la página iba lenta. Los totales de la tabla no cambian.
+* **Elegir el periodo "Todo el tiempo"**: abrimos el botón *Presets* (`//button[contains(., 'Presets')]`) y elegimos esa opción. Nos interesan las visitas acumuladas desde 2015 porque los streams de *kworb.net* también son acumulados.
+* **Elegir el agente "Usuario"**: abrimos el desplegable (`div[aria-label='Agente']`) y elegimos "Usuario", para contar solo las visitas de personas y no las de robots.
+* **Escribir los artistas**: los escribimos uno a uno en la caja de páginas (`input[aria-label='Páginas']`) y elegimos su página entre las sugerencias.
+* **Borrar los artistas**: la web solo deja poner 10 páginas a la vez, así que entre un grupo y otro vaciamos la caja con su botón (`button.app-pages__clear[aria-label='Limpiar']`).
+
+Para las opciones de los desplegables usamos XPath buscando su texto exacto, por ejemplo `//*[@role='option'][normalize-space()='Mensual']`.
+
+Durante la construcción del bot nos encontramos con varias trabas que obligaron a cambiar el planteamiento inicial:
+
+* **`clearElement()` no funcionaba**: el texto nuevo se pegaba al antiguo (`es.wikipedia.orgen.wikipedia.org`), así que pulsamos la X de la caja, como haría una persona.
+* **La web recuerda las opciones**: mantenía las de la consulta anterior, así que el bot las fija todas en cada vuelta.
+* **El orden importa**: al cambiar a "Mensual" se reinician las fechas, por eso primero va el tipo de fecha y después el periodo.
+
+```{r eval=FALSE}
+elegir_proyecto <- function(proyecto) {
+  # clearElement() no funciona en esta caja, así que pulsamos la X
+  element <- driver$findElement(using = "css", "input[aria-label='Proyecto'] ~ span.cdx-text-input__clear-icon")
+  element$clickElement()
+  Sys.sleep(1)
+
+  element <- driver$findElement(using = "css", "input[aria-label='Proyecto']")
+  element$sendKeysToElement(list(proyecto))
+  Sys.sleep(4)
+
+  # con el teclado para no confundir esta lista de sugerencias con otras de la página
+  element$sendKeysToElement(list(key = "down_arrow"))
+  element$sendKeysToElement(list(key = "enter"))
+  Sys.sleep(3)
+}
+
+elegir_tipo_fecha <- function() {
+  element <- driver$findElement(using = "css", "div[aria-label='Tipo de fecha']")
+  element$clickElement()
+  Sys.sleep(2)
+
+  element <- driver$findElement(using = "xpath", "//*[@role='option'][normalize-space()='Mensual']")
+  element$clickElement()
+  Sys.sleep(3)
+}
+
+elegir_periodo <- function() {
+  element <- driver$findElement(using = "xpath", "//button[contains(., 'Presets')]")
+  element$clickElement()
+  Sys.sleep(2)
+
+  element <- driver$findElement(using = "xpath", "//*[@role='option'][normalize-space()='Todo el tiempo']")
+  element$clickElement()
+  Sys.sleep(3)
+}
+
+elegir_agente <- function() {
+  element <- driver$findElement(using = "css", "div[aria-label='Agente']")
+  element$clickElement()
+  Sys.sleep(2)
+
+  element <- driver$findElement(using = "xpath", "//*[@role='option'][normalize-space()='Usuario']")
+  element$clickElement()
+  Sys.sleep(3)
+}
+
+escribir_artista <- function(titulo) {
+  element <- driver$findElement(using = "css", "input[aria-label='Páginas']")
+  element$sendKeysToElement(list(titulo))
+  Sys.sleep(4)
+
+  element$sendKeysToElement(list(key = "down_arrow"))
+  element$sendKeysToElement(list(key = "enter"))
+  Sys.sleep(2)
+}
+
+borrar_artistas <- function() {
+  element <- driver$findElement(using = "css", "button.app-pages__clear[aria-label='Limpiar']")
+  element$clickElement()
+  Sys.sleep(2)
+}
+```
+
+## 3.5. Lectura de la tabla de resultados
+
+Con varias páginas cargadas, la web muestra una tabla con una fila por artista. La leemos con `findElements()` (filas), `findChildElements()` (celdas) y `getElementText()` (texto), y juntamos las filas con `lapply()` y `bind_rows()`.
+
+Al principio leíamos las celdas por posición, pero en la Wikipedia inglesa los datos salían desplazados porque tiene una columna extra, "Clase" (la nota de calidad del artículo). Por eso ahora leemos la cabecera y buscamos cada dato por el nombre de su columna.
+
+```{r eval=FALSE}
+leer_fila <- function(fila, cabeceras) {
+  celdas <- fila$findChildElements(using = "css", "td")
+  textos <- sapply(celdas, function(celda) celda$getElementText()[[1]])
+
+  # por nombre y no por posición: la Wikipedia inglesa tiene una columna más ("Clase")
+  names(textos) <- cabeceras
+
+  data.frame(
+    pagina          = textos[["Título de página"]],
+    visualizaciones = textos[["Visualizaciones"]],
+    # en mensual la columna pasa a llamarse "Promedio mensual"
+    promedio        = textos[[str_subset(cabeceras, "^Promedio")]],
+    ediciones       = textos[["Ediciones"]],
+    editores        = textos[["Editores"]],
+    tamano          = textos[["Tamaño"]],
+    proteccion      = textos[["Protección"]],
+    vigilantes      = textos[["Vigilantes"]],
+    clase           = if ("Clase" %in% cabeceras) textos[["Clase"]] else NA
+  )
+}
+
+leer_tabla <- function() {
+  cabeceras <- driver$findElements(using = "css", "table thead th")
+  cabeceras <- sapply(cabeceras, function(celda) celda$getElementText()[[1]])
+
+  filas <- driver$findElements(using = "css", "table tbody tr")
+
+  lapply(filas, leer_fila, cabeceras = cabeceras) %>%
+    bind_rows()
+}
+```
+
+## 3.6. Artistas con nombres ambiguos
+
+Al revisar la primera extracción vimos que algunos artistas aparecían con **0 visitas**. El problema era que, al escribir solo el nombre, el bot elegía la página de **desambiguación** (la que lista todo lo que se llama igual) y no la del artista. Pasaba con *Drake* y *Quevedo*, cuyas páginas reales son "Drake (músico)" / "Drake (musician)" y "Quevedo (cantante)" / "Quevedo (singer)". Otro caso fue *Danny Ocean*: en la Wikipedia inglesa el bot cogió la desambiguación (que incluye al personaje de *Ocean's Eleven*). Lo detectamos gracias a la columna "Clase", que en esa página valía "Disambig", y desde entonces la usamos como control de calidad.
+
+Por último, *Alleh* no tiene página propia: en la Wikipedia española existe la del dúo "Alleh y Yorghaki" y en la inglesa no hay ninguna. Decidimos usar la página del dúo en la española y dejar la inglesa vacía (`NA`), ya que no tener página no es lo mismo que tener 0 visitas.
+
+Para resolverlo creamos una tabla de correcciones con el título exacto que debe escribir el bot en cada Wikipedia:
+
+```{r eval=FALSE}
+# NA = no tiene página en esa Wikipedia
+titulos_wiki <- data.frame(
+  artista  = c("Drake",            "Quevedo",            "Alleh",
+               "Drake",            "Quevedo",            "Alleh",            "Danny Ocean"),
+  proyecto = c("es.wikipedia.org", "es.wikipedia.org",   "es.wikipedia.org",
+               "en.wikipedia.org", "en.wikipedia.org",   "en.wikipedia.org", "en.wikipedia.org"),
+  titulo   = c("Drake (músico)",   "Quevedo (cantante)", "Alleh y Yorghaki",
+               "Drake (musician)", "Quevedo (singer)",   NA,                 "Danny Ocean (singer)")
+)
+
+buscar_titulo <- function(artista, proyecto) {
+  correccion <- titulos_wiki %>%
+    filter(artista == !!artista, proyecto == !!proyecto)
+  if (nrow(correccion) == 1) correccion$titulo else artista
+}
+```
+
+Esto generaba un último problema: si el título de la página es "Drake (músico)", ¿cómo sabemos que corresponde al artista "Drake" de *kworb.net*? La tabla de resultados no sirve porque se ordena por visitas, no por el orden en que escribimos. La solución la encontramos en la propia URL: la web guarda en ella las páginas **en el orden en que se escribieron** (`pages=Taylor_Swift|Bad_Bunny`), así que basta con leerla para emparejar cada artista con su página.
+
+```{r eval=FALSE}
+# la URL guarda las páginas en el orden en que se escribieron (la tabla las ordena por visitas)
+paginas_elegidas <- function() {
+  url <- driver$getCurrentUrl()[[1]]
+
+  paginas <- str_extract(url, "(?<=pages=)[^&]+")
+  paginas <- URLdecode(paginas)
+  paginas <- str_split(paginas, "\\|")[[1]]
+  str_replace_all(paginas, "_", " ")
+}
+```
+
+## 3.7. Bucle principal
+
+Con todas las piezas preparadas, el bucle sigue la siguiente lógica: una lista vacía, un bucle que va guardando cada tabla al final con `resultados[[length(resultados) + 1]]` y un `bind_rows()` final. En nuestro caso hay tres bucles anidados: para cada Wikipedia, para cada grupo de artistas y para cada artista. Los 16 artistas de la parte estática se reparten en dos grupos de 8, ya que la web admite como máximo 10 páginas a la vez.
+
+```{r eval=FALSE}
+artistas <- unique(datos_A$Artista)
+
+# máximo 10 páginas por consulta
+grupos <- list(artistas[1:8],
+               artistas[9:length(artistas)])
+
+proyectos <- c("en.wikipedia.org", "es.wikipedia.org")
+
+resultados <- list()
+
+driver$navigate("https://pageviews.wmcloud.org")
+Sys.sleep(5)
+
+for (proyecto in proyectos) {
+
+  # la web recuerda las últimas opciones, así que las fijamos siempre
+  elegir_proyecto(proyecto)
+  elegir_tipo_fecha()
+  elegir_periodo()
+  elegir_agente()
+
+  for (grupo in grupos) {
+
+    escritos <- c()
+    for (artista in grupo) {
+      titulo <- buscar_titulo(artista, proyecto)
+      if (!is.na(titulo)) {
+        escribir_artista(titulo)
+        escritos <- c(escritos, artista)
+      }
+    }
+    Sys.sleep(5)
+
+    tabla <- leer_tabla()
+    tabla$proyecto <- proyecto
+
+    elegidas <- paginas_elegidas()
+    if (length(elegidas) == length(escritos)) {
+      equivalencia <- data.frame(artista = escritos, pagina = elegidas)
+      tabla <- left_join(tabla, equivalencia, by = "pagina")
+    } else {
+      cat("Aviso: no coinciden artistas y páginas en", proyecto, "\n")
+      tabla$artista <- NA
+    }
+
+    resultados[[length(resultados) + 1]] <- tabla
+
+    borrar_artistas()
+  }
+}
+
+datos_wiki <- bind_rows(resultados)
+
+driver$close()
+rD$server$stop()
+```
+
+El scraping se realizó el **11 de noviembre de 2026**, por lo que el periodo "Todo el tiempo" en formato mensual abarca de **julio de 2015 a octubre de 2026**. Si se ejecutara otro día el final del periodo cambiaría, por eso guardamos los datos en `.csv`.
+
+## 3.8. Limpieza y cruce con la parte estática
+
+Los números de la tabla vienen como texto y con el punto como separador de miles (`"9.001.532"`), así que los convertimos con `parse_number()` indicando ese separador. Después separamos las dos Wikipedias para tener una fila por artista y las unimos a los datos de *kworb.net* por el nombre. Con eso calculamos tres métricas nuevas:
+
+* **visitas_total**: visitas en la Wikipedia inglesa más la española.
+* **visitas_por_millon**: visitas por cada millón de streams. Mide la curiosidad que despierta un artista en relación con lo que se le escucha.
+* **peso_hispano_pct**: porcentaje de las visitas que llegan desde la Wikipedia española.
+
+```{r eval=FALSE}
+datos_wiki_limpio <- datos_wiki %>%
+  mutate(
+    visualizaciones = parse_number(visualizaciones, locale = locale(grouping_mark = ".")),
+    promedio        = parse_number(promedio,        locale = locale(grouping_mark = ".")),
+    ediciones       = parse_number(ediciones,       locale = locale(grouping_mark = ".")),
+    editores        = parse_number(editores,        locale = locale(grouping_mark = ".")),
+    tamano          = parse_number(tamano,          locale = locale(grouping_mark = ".")),
+    vigilantes      = parse_number(vigilantes,      locale = locale(grouping_mark = "."))
+  )
+
+wiki_en <- datos_wiki_limpio %>%
+  filter(proyecto == "en.wikipedia.org") %>%
+  select(artista, visitas_en = visualizaciones, promedio_en = promedio,
+         ediciones_en = ediciones, vigilantes_en = vigilantes, clase_en = clase)
+
+wiki_es <- datos_wiki_limpio %>%
+  filter(proyecto == "es.wikipedia.org") %>%
+  select(artista, visitas_es = visualizaciones, promedio_es = promedio,
+         ediciones_es = ediciones, vigilantes_es = vigilantes)
+
+wiki_artistas <- full_join(wiki_en, wiki_es, by = "artista")
+
+datos_final <- datos_A %>%
+  left_join(wiki_artistas, by = c("Artista" = "artista")) %>%
+  mutate(
+    visitas_total      = visitas_en + visitas_es,
+    visitas_por_millon = round(visitas_total / (Streams_Totales / 1e6), 1),
+    peso_hispano_pct   = round(visitas_es / visitas_total * 100, 1)
+  )
+
+write.csv(datos_wiki,  "datos_pageviews.csv", row.names = FALSE)
+write.csv(datos_final, "datos_final.csv",     row.names = FALSE)
+```
+
+El resultado final es el siguiente:
+
+```{r warning=FALSE, message=FALSE}
+datos_final <- read.csv("datos_final.csv")
+
+datos_final %>%
+  select(Artista, Grupo, Streams_Totales, visitas_en, visitas_es,
+         visitas_por_millon, peso_hispano_pct) %>%
+  knitr::kable()
+```
+
+
+# 4. Análisis
+
+Para el análisis dejamos fuera a *Alleh*, ya que sin página en la Wikipedia inglesa no se puede calcular su interés total. Trabajamos por tanto con 15 artistas: 8 del top global y 7 del top de España.
+
+```{r warning=FALSE, message=FALSE}
+library(ggplot2)
+
+datos_analisis <- datos_final %>%
+  filter(!is.na(visitas_total)) %>%
+  mutate(streams_miles_mill = Streams_Totales / 1e9,
+         visitas_mill       = visitas_total / 1e6)
+```
+
+## 4.1. ¿Más escuchas implican más interés?
+
+```{r warning=FALSE, message=FALSE}
+ggplot(datos_analisis, aes(x = streams_miles_mill, y = visitas_mill, color = Grupo)) +
+  geom_point(size = 3) +
+  geom_text(aes(label = Artista), vjust = -0.9, size = 3, show.legend = FALSE) +
+  scale_x_log10(expand = expansion(mult = 0.15)) +
+  scale_y_log10(expand = expansion(mult = 0.15)) +
+  labs(title = "Streams en Spotify frente a visitas en Wikipedia",
+       x = "Streams totales (miles de millones, escala log)",
+       y = "Visitas en Wikipedia (millones, escala log)",
+       color = "Top") +
+  theme_minimal()
+
+# Spearman porque son pocos datos y con valores muy extremos
+cor(datos_analisis$Streams_Totales, datos_analisis$visitas_total, method = "spearman")
+```
+
+Usamos escala logarítmica porque los artistas globales tienen muchísimos más streams y visitas que los españoles y, en escala normal, estos últimos quedarían todos amontonados en una esquina. La relación es claramente positiva (correlación de Spearman de **0,83**): los artistas más escuchados son también los más buscados. Sin embargo, se ven dos grupos muy separados y la diferencia en interés es mucho mayor que en escuchas: la mediana de streams del top global es unas 5 veces la del top español, pero la mediana de visitas es unas **14 veces** mayor. Dentro de cada grupo la relación es más débil: por ejemplo, *Rauw Alejandro* tiene bastantes más streams que *Marshmello* pero muchas menos visitas.
+
+## 4.2. ¿Quién despierta más curiosidad de la que le corresponde?
+
+```{r warning=FALSE, message=FALSE}
+ggplot(datos_analisis, aes(x = reorder(Artista, visitas_por_millon), y = visitas_por_millon, fill = Grupo)) +
+  geom_col() +
+  coord_flip() +
+  labs(title = "Visitas en Wikipedia por cada millón de streams",
+       x = NULL, y = "Visitas por millón de streams", fill = "Top") +
+  theme_minimal()
+```
+
+Este gráfico corrige el tamaño de cada artista y mide la curiosidad **relativa**. Los artistas globales ocupan la parte de arriba (mediana de 769 visitas por millón de streams frente a 194 en el top español). Destacan *Ariana Grande* y *Kanye West*, que creemos que interesan más allá de su música (la primera también como actriz y el segundo por su exposición mediática), aunque es una hipótesis que nuestros datos no pueden demostrar. En el otro extremo, *Drake* y *Bad Bunny*, dos de los artistas más escuchados del mundo, son los globales con menos curiosidad relativa: se escuchan muchísimo, pero eso no se traduce en búsquedas en la misma proporción. Curiosamente, durante el proyecto vimos que Bad Bunny llegó a tener unas 388.000 visitas en un solo día, el 8 de febrero de 2026, cuando actuó en el descanso de la Super Bowl: un evento en directo dispara el interés mucho más que el streaming del día a día.
+Del top español, *Marshmello* y *KAROL G* son los que más curiosidad despiertan, precisamente los de perfil más internacional, mientras que *Quevedo* y *Rauw Alejandro* cierran la lista.
+
+## 4.3. ¿Dónde interesa cada artista?
+
+```{r warning=FALSE, message=FALSE}
+ggplot(datos_analisis, aes(x = reorder(Artista, peso_hispano_pct), y = peso_hispano_pct, fill = Grupo)) +
+  geom_col() +
+  geom_hline(yintercept = 50, linetype = "dashed") +
+  coord_flip() +
+  labs(title = "Porcentaje de visitas que llegan desde la Wikipedia española",
+       x = NULL, y = "% de visitas en la Wikipedia española", fill = "Top") +
+  theme_minimal()
+```
+
+Es probablemente el resultado más claro del trabajo: la línea del 50 % separa casi perfectamente los dos grupos. Todos los artistas del top español menos uno reciben la mayoría de sus visitas desde la Wikipedia española (*Quevedo* llega al 92 %), mientras que ningún artista global supera el 30 %. Hay dos excepciones muy interesantes. *Bad Bunny* es el global con más peso hispano (29 %), lo que tiene sentido al ser el único que canta en español. *Marshmello*, en cambio, está en el top de España por "El Merengue", pero al ser un DJ estadounidense su interés viene sobre todo de la Wikipedia inglesa (14 %). Es decir, lo que marca dónde interesa un artista no es dónde se le escucha, sino su idioma y su origen.
+
+## 4.4. Resumen por grupos
+
+```{r warning=FALSE, message=FALSE}
+datos_analisis %>%
+  group_by(Grupo) %>%
+  summarise(
+    artistas                = n(),
+    mediana_streams_mm      = median(streams_miles_mill),
+    mediana_visitas_mill    = median(visitas_mill),
+    mediana_visitas_millon  = median(visitas_por_millon),
+    mediana_peso_hispano    = median(peso_hispano_pct)
+  ) %>%
+  knitr::kable(digits = 1,
+               col.names = c("Grupo", "Artistas", "Streams (miles de mill.)", "Visitas (mill.)",
+                             "Visitas por millón", "% hispano"))
+```
+
+La tabla resume bien lo visto en los gráficos: el top global tiene unas 5 veces más streams que el español (91 frente a 19,5 miles de millones), pero unas 15 veces más visitas (64,3 frente a 4,4 millones), y su peso hispano es mucho menor (9,6 % frente a 70,3 %).
+
+En resumen, los datos respaldan nuestra hipótesis: los artistas globales reciben más búsquedas que los nacionales, tanto en total como en relación con sus escuchas, mientras que el interés por los del top español es mucho más local.
+
+# 5. Conclusiones
+
+Volviendo a las dos preguntas del inicio:
+
+* **¿Son los artistas más escuchados en Spotify los que más interés generan en Internet?** En general sí: streams y visitas en Wikipedia van muy relacionados (correlación de 0,83). Pero no del todo, ya que hay artistas como *Ariana Grande* o *Kanye West* que interesan bastante más de lo que se les escucha, y otros como *Drake* o *Bad Bunny* que se escuchan muchísimo sin generar tantas búsquedas en proporción.
+* **¿Hay diferencias entre los artistas top globales y los de España?** Sí, y bastante claras. Los globales tienen unas 5 veces más streams pero unas 15 veces más visitas, por lo que despiertan mucha más curiosidad relativa. Además, el interés por los artistas del top español se concentra en la Wikipedia española, mientras que el de los globales viene casi todo de la inglesa.
+
+Por tanto, nuestra hipótesis se cumple. A nivel técnico, el trabajo nos ha servido para ver la diferencia real entre ambos tipos de scraping: con *kworb.net* bastaba con leer el HTML, mientras que en *Pageviews Analysis* tuvimos que reproducir con un bot lo que haría una persona, lidiando con problemas que no aparecen en el scraping estático (selectores que cambian, campos que no se borran, opciones que la web recuerda...). También aprendimos que encontrar una web dinámica que se pueda scrapear de forma ética no es nada fácil.
